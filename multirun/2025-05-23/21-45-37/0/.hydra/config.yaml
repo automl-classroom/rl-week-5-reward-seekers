@@ -1,0 +1,11 @@
+env:
+  name: CartPole-v1
+seed: 0
+agent:
+  lr: 0.01
+  gamma: 0.99
+  hidden_size: 128
+train:
+  episodes: 1000
+  eval_interval: 50
+  eval_episodes: 5

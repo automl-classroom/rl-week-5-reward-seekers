@@ -73,6 +73,11 @@ class Policy(nn.Module):
         # self.fc1 should map from self.state_dim to hidden_size
         # self.fc2 should map from hidden_size to self.n_actions
 
+        self.fc1 = nn.Linear(self.state_dim, hidden_size)
+        self.relu = nn.ReLU()
+        self.fc2 = nn.Linear(hidden_size, self.n_actions)
+        self.softmax = nn.Softmax(dim=-1)
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Compute action probabilities for given state(s).
@@ -90,7 +95,16 @@ class Policy(nn.Module):
         # TODO: Apply fc1 followed by ReLU (Flatten input if needed)
         # TODO: Apply fc2 to get logits
         # TODO: Return softmax over logits along the last dimension
-        pass
+        if x.dim() > 1:
+            x = x.flatten(start_dim=1)
+        # Flatten the input if state_space was multi-dimensional (e.g., image)
+        # For typical vector states (Box(shape=(N,)), this reshape is a no-op on the last dim)
+        # x = x.view(x.size(0), -1)
+        fc1_out = self.fc1(x)
+        a_fc1 = self.relu(fc1_out)
+        logit = self.fc2(a_fc1)
+        x_prob = self.softmax(logit)
+        return x_prob
 
 
 class REINFORCEAgent(AbstractAgent):
@@ -164,7 +178,17 @@ class REINFORCEAgent(AbstractAgent):
         # TODO: Pass state through the policy network to get action probabilities
         # If evaluate is True, return the action with highest probability
         # Otherwise, sample from the action distribution and return the log-probability as a key in the dictionary (Hint: use torch.distributions.Categorical)
-        return 0, {}  # Placeholder return value
+        state_tensor = torch.from_numpy(state).float()
+        action_probs = self.policy(state_tensor)
+
+        if evaluate:
+            action = torch.argmax(action_probs).item()
+            return action, {}
+        else:
+            dist = torch.distributions.Categorical(action_probs)
+            action = dist.sample()
+            log_prob = dist.log_prob(action)
+            return action.item(), {"log_prob": log_prob}
 
     def compute_returns(self, rewards: List[float]) -> torch.Tensor:
         """
@@ -186,7 +210,12 @@ class REINFORCEAgent(AbstractAgent):
         #       - Update R = r + gamma * R
         #       - Insert R at the beginning of the returns list
         # TODO: Convert the list of returns to a torch.Tensor and return
-        pass
+        R = 0
+        returns = []
+        for r in reversed(rewards):
+            R = r + self.gamma * R
+            returns.insert(0, R)
+        return torch.tensor(returns, dtype=torch.float32)
 
     def update_agent(
         self,
@@ -216,7 +245,14 @@ class REINFORCEAgent(AbstractAgent):
 
         # TODO: Normalize returns with mean and standard deviation,
         # and add 1e-8 to the denominator to avoid division by zero
-        norm_returns = returns_t
+        mean = returns_t.mean()
+        sum = 0.0
+        for i in returns_t:
+            sum += (float(i) - float(mean)) ** 2
+        sum = sum / (len(returns_t))
+        std = sum**0.5
+
+        norm_returns = (returns_t - mean) / (std + 1e-8)
 
         lp_tensor = torch.stack(log_probs)
         loss = -torch.sum(lp_tensor * norm_returns)
@@ -280,11 +316,32 @@ class REINFORCEAgent(AbstractAgent):
         self.policy.eval()
         returns: List[float] = []  # noqa: F841
         # TODO: rollout num_episodes in eval_env and aggregate undiscounted returns across episodes
+        for _ in range(num_episodes):
+            state, _ = eval_env.reset()
+            done = False
+            total_return = 0.0
+
+            while not done:
+                action, _ = self.predict_action(state, evaluate=True)
+                next_state, reward, term, trunc, _ = eval_env.step(action)
+                done = term or trunc
+                total_return += reward
+                state = next_state
+
+            returns.append(total_return)
+        returns = np.array(returns)
 
         self.policy.train()  # Set back to training mode
 
         # TODO: Return the mean and std of the returns across episodes
-        return 0.0, 0.0
+        if len(returns) > 0:
+            mean_return = np.mean(returns)
+            std_return = np.std(returns)
+            return mean_return, std_return
+        else:
+            # No episodes were run, return zeros
+            print("No episodes were run during evaluation.")
+            return 0.0, 0.0
 
     def train(
         self,
