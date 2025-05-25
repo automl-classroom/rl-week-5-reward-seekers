@@ -4,16 +4,23 @@ Deep Q-Learning implementation.
 
 from typing import Any, Dict, List, Tuple
 
+import itertools
+import os
+
 import gymnasium as gym
 import hydra
+import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from hydra.utils import get_original_cwd
 from omegaconf import DictConfig
 from rl_exercises.agent import AbstractAgent
 from rl_exercises.week_4.buffers import ReplayBuffer
-from rl_exercises.week_4.networks import QNetwork
+
+# from rl_exercises.week_4.networks import QNetwork
+from rl_exercises.week_4.mod_networks import QNetwork
 
 
 def set_seed(env: gym.Env, seed: int = 0) -> None:
@@ -59,6 +66,8 @@ class DQNAgent(AbstractAgent):
         epsilon_decay: int = 500,
         target_update_freq: int = 1000,
         seed: int = 0,
+        hidden_dim: int = 64,
+        depth: int = 2,
     ) -> None:
         """
         Initialize replay buffer, Q-networks, optimizer, and hyperparameters.
@@ -105,8 +114,8 @@ class DQNAgent(AbstractAgent):
         n_actions = env.action_space.n
 
         # main Q-network and frozen target
-        self.q = QNetwork(obs_dim, n_actions)
-        self.target_q = QNetwork(obs_dim, n_actions)
+        self.q = QNetwork(obs_dim, n_actions, hidden_dim, depth)
+        self.target_q = QNetwork(obs_dim, n_actions, hidden_dim, depth)
         self.target_q.load_state_dict(self.q.state_dict())
 
         self.optimizer = optim.Adam(self.q.parameters(), lr=lr)
@@ -133,9 +142,11 @@ class DQNAgent(AbstractAgent):
         """
         # TODO: implement exponential‐decayin
         # ε = ε_final + (ε_start - ε_final) * exp(-total_steps / ε_decay)
+        epsilon_ = self.epsilon_final + (
+            self.epsilon_start - self.epsilon_final
+        ) * np.exp(-self.total_steps / self.epsilon_decay)
+        return epsilon_
         # Currently, it is constant and returns the starting value ε
-
-        return self.epsilon_start
 
     def predict_action(
         self, state: np.ndarray, evaluate: bool = False
@@ -161,16 +172,20 @@ class DQNAgent(AbstractAgent):
         if evaluate:
             # TODO: select purely greedy action from Q(s)
             with torch.no_grad():
-                qvals = ...  # noqa: F841
+                # pass state through Q-network
+                qvals = self.q(torch.tensor(state, dtype=torch.float32).unsqueeze(0))  # noqa: F841
 
-            action = None
+            action = torch.argmax(qvals, dim=1).item()  # get index of max Q-value
         else:
             if np.random.rand() < self.epsilon():
                 # TODO: sample random action
-                action = None
+                action = self.env.action_space.sample()
             else:
                 # TODO: select purely greedy action from Q(s)
-                action = None
+                action = torch.argmax(
+                    self.q(torch.tensor(state, dtype=torch.float32).unsqueeze(0)),
+                    dim=1,
+                ).item()
 
         return action
 
@@ -229,11 +244,14 @@ class DQNAgent(AbstractAgent):
         mask = torch.tensor(np.array(dones), dtype=torch.float32)  # noqa: F841
 
         # # TODO: pass batched states through self.q and gather Q(s,a)
-        pred = ...
+        pred = self.q(s).gather(1, a)  # .squeeze(1)  # shape (batch,)
 
         # TODO: compute TD target with frozen network
         with torch.no_grad():
-            target = ...
+            # TD target: r + γ * max Q(s', a') * (1 - done)
+            # pass next states through target network
+            target = r + self.gamma * self.target_q(s_next).max(dim=1)[0] * (1 - mask)
+            target = target.unsqueeze(1)
 
         loss = nn.MSELoss()(pred, target)
 
@@ -263,12 +281,14 @@ class DQNAgent(AbstractAgent):
         state, _ = self.env.reset()
         ep_reward = 0.0
         recent_rewards: List[float] = []
+        x_frames: List[int] = []
+        y_mean_rewards: List[float] = []
 
         for frame in range(1, num_frames + 1):
             action = self.predict_action(state)
             next_state, reward, done, truncated, _ = self.env.step(action)
 
-            # store and step
+            # store and ste
             self.buffer.add(state, action, reward, next_state, done or truncated, {})
             state = next_state
             ep_reward += reward
@@ -276,7 +296,7 @@ class DQNAgent(AbstractAgent):
             # update if ready
             if len(self.buffer) >= self.batch_size:
                 # TODO: sample a batch from replay buffer
-                batch = ...
+                batch = self.buffer.sample(self.batch_size)
                 _ = self.update_agent(batch)
 
             if done or truncated:
@@ -284,25 +304,76 @@ class DQNAgent(AbstractAgent):
                 recent_rewards.append(ep_reward)
                 ep_reward = 0.0
                 # logging
+                # print(len(recent_rewards) % eval_interval)
+                # print(frame)
                 if len(recent_rewards) % 10 == 0:
                     # TODO: compute avg over last eval_interval episodes and print
-                    avg = ...
+                    avg = np.mean(recent_rewards[-eval_interval:])
+                    x_frames.append(frame)
+                    y_mean_rewards.append(avg)
                     print(
                         f"Frame {frame}, AvgReward(10): {avg:.2f}, ε={self.epsilon():.3f}"
                     )
 
         print("Training complete.")
+        return x_frames, y_mean_rewards
 
 
 @hydra.main(config_path="../configs/agent/", config_name="dqn", version_base="1.1")
 def main(cfg: DictConfig):
     # 1) build env
+    print("start")
     env = gym.make(cfg.env.name)
     set_seed(env, cfg.seed)
-
+    print(f"test confi: {cfg.env.name}, {cfg.seed}")
     # 3) TODO: instantiate & train the agent
-    agent = ...
-    agent.train(...)
+    depths = [2, 3]
+    widths = [64, 128]
+    buffer_sizes = [10000, 15000]
+    batch_sizes = [32, 64]
+
+    original_cwd = get_original_cwd()
+    plots_dir = os.path.join(original_cwd, "plots")
+    os.makedirs(plots_dir, exist_ok=True)
+
+    combinations = list(itertools.product(depths, widths, buffer_sizes, batch_sizes))
+
+    for depth, width, buffer_capacity, batch_size in combinations:
+        print(
+            f"\nRunning config: depth={depth}, width={width}, buffer={buffer_capacity}, batch={batch_size}"
+        )
+        agent = DQNAgent(
+            env=env,
+            buffer_capacity=buffer_capacity,
+            batch_size=batch_size,
+            lr=cfg.agent.learning_rate,
+            gamma=cfg.agent.gamma,
+            epsilon_start=cfg.agent.epsilon_start,
+            epsilon_final=cfg.agent.epsilon_final,
+            epsilon_decay=cfg.agent.epsilon_decay,
+            target_update_freq=cfg.agent.target_update_freq,
+            seed=cfg.seed,
+            hidden_dim=width,
+            depth=depth,
+        )
+
+        x_frames, y_mean_rewards = agent.train(
+            num_frames=cfg.train.num_frames,
+            eval_interval=cfg.train.eval_interval,
+        )
+
+        plot_title = f"D{depth}_W{width}_B{batch_size}_Buf{buffer_capacity}"
+        plot_path = os.path.join(plots_dir, f"training_curve_{plot_title}.png")
+
+        plt.figure()
+        plt.plot(x_frames, y_mean_rewards, label="Mean Reward")
+        plt.xlabel("Number of Frames")
+        plt.ylabel("Mean Reward")
+        plt.title(f"Training Curve\n{plot_title}")
+        plt.legend()
+        plt.grid(True)
+        plt.savefig(plot_path)
+        plt.close()
 
 
 if __name__ == "__main__":

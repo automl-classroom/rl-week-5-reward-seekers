@@ -97,6 +97,8 @@ class Policy(nn.Module):
         # TODO: Return softmax over logits along the last dimension
         if x.dim() > 1:
             x = x.flatten(start_dim=1)
+        #print(f"Input shape: {x.shape}")
+        #print(f"Input : {x}")
         # Flatten the input if state_space was multi-dimensional (e.g., image)
         # For typical vector states (Box(shape=(N,)), this reshape is a no-op on the last dim)
         # x = x.view(x.size(0), -1)
